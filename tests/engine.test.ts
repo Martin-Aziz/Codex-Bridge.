@@ -50,7 +50,7 @@ test("persists a finished task and resumes its Codex thread after engine restart
     const first = f.engine.submit(f.project.id, "Inspect this repository", "request-001");
     assert.equal((await f.engine.wait(first.id)).status, "SUCCEEDED");
     assert.equal(f.engine.getTask(first.id).threadId, "fake-thread-1");
-    assert.equal(f.engine.events(first.id).length, 5);
+    assert.equal(f.engine.events(first.id).length, 6);
     assert.equal(f.engine.submit(f.project.id, "Inspect this repository", "request-001").id, first.id);
     const next = f.engine.continueTask(first.id, "Explain the design", "request-002");
     assert.equal((await f.engine.wait(next.id)).status, "SUCCEEDED");
@@ -103,4 +103,38 @@ test("restart marks abandoned active tasks as interrupted", async () => {
     assert.equal(restored.getTask(queued.id).status, "INTERRUPTED");
     restored.close();
   } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
+test("project reservation is shared across engine instances and recovered after restart", async () => {
+  const f = await fixture();
+  try {
+    const task = f.engine.submit(f.project.id, "slow read-only inspection");
+    const secondStore = new Store(join(f.dir, "tasks.sqlite"));
+    const secondEngine = new TaskEngine(secondStore, new FakeRunner());
+    assert.throws(() => secondEngine.submit(f.project.id, "another read-only inspection"), /already running/);
+    await f.engine.wait(task.id);
+    secondStore.close();
+    assert.equal(f.store.projectBusy(f.project.id), false);
+  } finally { await f.cleanup(); }
+});
+
+test("stream failure and cancellation persist terminal lifecycle events", async () => {
+  const f = await fixture();
+  try {
+    const cancelled = f.engine.submit(f.project.id, "slow inspection");
+    f.engine.cancelTask(cancelled.id);
+    assert.equal((await f.engine.wait(cancelled.id)).status, "CANCELLED");
+    assert.ok(f.engine.events(cancelled.id).some(e => e.type === "task.cancelled"));
+    const failed = f.engine.submit(f.project.id, "fail inspection");
+    assert.equal((await f.engine.wait(failed.id)).status, "FAILED");
+    assert.ok(f.engine.events(failed.id).some(e => e.type === "task.failed"));
+  } finally { await f.cleanup(); }
+});
+
+test("persisted database uses private file permissions", async () => {
+  const f = await fixture();
+  try {
+    const { stat } = await import("node:fs/promises");
+    assert.equal((await stat(join(f.dir, "tasks.sqlite"))).mode & 0o777, 0o600);
+  } finally { await f.cleanup(); }
 });

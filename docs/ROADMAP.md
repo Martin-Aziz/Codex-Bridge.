@@ -9,13 +9,14 @@
 - [x] Cancel tasks; mark abandoned tasks interrupted after restart
 - [x] Loopback bearer-authenticated local HTTP API
 - [x] CLI, core tests and setup/security documentation
-- [ ] Real Codex smoke test on an authenticated macOS machine
-- [ ] Generate and commit a reproducible package-lock.json after installing on Mac
+- [x] Real authenticated Codex start and continuation smoke test against a disposable read-only repository
+- [x] Generate and commit a reproducible package-lock.json
 
-## Phase 2 — Local dashboard and inspection
+## Phase 2 — Local dashboard and inspection (implemented)
 
-- [ ] React+Vite projects, task history, event timeline, report views
-- [ ] Diff capture and independent test-run evidence
+- [x] React+Vite projects, task history, event timeline, report views
+- [x] Read-only tracked-file diff view and SDK-observed command results
+- [ ] Independent test-run evidence and task-scoped diff snapshots
 - [ ] Persistent provenance, event retention and pagination
 - [ ] Playwright UI tests
 

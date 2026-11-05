@@ -16,16 +16,25 @@ const tokenFile = join(dataDir, "access-token");
 const dbFile = join(dataDir, "bridge.sqlite");
 
 function token(): string {
-  if (process.env.CODEX_BRIDGE_TOKEN) return process.env.CODEX_BRIDGE_TOKEN;
+  if (process.env.CODEX_BRIDGE_TOKEN) {
+    if (process.env.CODEX_BRIDGE_TOKEN.length < 32) throw new Error("CODEX_BRIDGE_TOKEN must contain at least 32 characters");
+    return process.env.CODEX_BRIDGE_TOKEN;
+  }
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const directory = lstatSync(dataDir);
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("Data path must be a real directory");
+  chmodSync(dataDir, 0o700);
   if (!existsSync(tokenFile)) {
     try { writeFileSync(tokenFile, randomBytes(32).toString("hex"), { flag: "wx", mode: 0o600 }); }
     catch (e) { if (!existsSync(tokenFile)) throw e; }
   }
   const info = lstatSync(tokenFile);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error("Token path must be a regular file");
+  if (info.nlink !== 1) throw new Error("Token path must not be hard-linked");
   chmodSync(tokenFile, 0o600);
-  return readFileSync(tokenFile, "utf8").trim();
+  const value = readFileSync(tokenFile, "utf8").trim();
+  if (value.length < 32) throw new Error("Token file is invalid; remove it and run the token command to regenerate");
+  return value;
 }
 
 async function main(): Promise<void> {

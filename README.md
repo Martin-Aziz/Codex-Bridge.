@@ -1,8 +1,8 @@
-# Codex Bridge — Phase 1
+# Codex Bridge — Local Dashboard
 
 A private, **local-first bridge** for supervising an OpenAI Codex coding session and retrieving structured task reports. Built for Node.js on macOS. **Phase 1 is read-only**: no remote project writes, Git pushes, deployments or arbitrary shell endpoint.
 
-> **Implementation status:** CLI + local JSON API + SQLite task engine are implemented and mock-tested. The official Codex SDK adapter is implemented but a real authenticated Mac/Codex smoke test has **not** been executed. MCP integration and the web dashboard are **not in Phase 1**; do not claim ChatGPT web can control Codex yet.
+> **Implementation status:** Local CLI, bearer-authenticated JSON API, SQLite task engine, official Codex SDK adapter, and React dashboard are implemented. The dashboard is served by the same authenticated loopback API. ChatGPT/MCP connectivity is not implemented.
 
 ## Prerequisites
 
@@ -33,14 +33,20 @@ npm run bridge -- report <taskId>
 
 # Continue the same persisted Codex thread in a new task:
 npm run bridge -- continue <taskId> "Explain the highest priority risk in more detail"
+
+# Start the local API and dashboard (leave this process running):
+npm run bridge -- serve
+# Open http://127.0.0.1:49441 in your browser and enter the bearer token.
+# In another terminal, print the token when needed:
+npm run bridge -- token
 ```
 
 The first live run requires working Codex auth and network access to the model provider. To use Codex from the terminal, follow its official CLI sign-in instructions. Never commit credentials. The `--` in `npm run bridge --` forwards the remaining arguments to the CLI.
 
-## Local API (for future MCP adapter)
+## Local API and dashboard
 
 ```bash
-npm run bridge -- serve           # loopback interface only: 127.0.0.1:49441
+npm run bridge -- serve           # dashboard + API on loopback: 127.0.0.1:49441
 npm run bridge -- token           # explicitly display the local bearer token
 ```
 
@@ -65,6 +71,7 @@ API endpoints:
 | GET | `/v1/tasks/:id/report` | Agent report and observed events |
 | POST | `/v1/tasks/:id/continue` | Continue source Codex thread with `prompt` |
 | POST | `/v1/tasks/:id/cancel` | Request cancellation |
+| GET | `/v1/projects/:id/diff` | Bounded read-only tracked-file diff against `HEAD` |
 
 `POST /v1/tasks` returns **202 Accepted** with task metadata; poll `GET /v1/tasks/:id` until terminal. Request bodies are JSON up to 64KB. All endpoints require bearer auth, strict Host/Origin validation, and are bound to loopback only. No wildcard CORS. These are **local control APIs**, not public remote endpoints.
 
@@ -83,8 +90,9 @@ Per-project execution locks prevent simultaneous Codex turns in one registered r
 
 ## Limitations and planned phases
 
-- **Phase 1 delivered:** registered Git roots, read-only Codex SDK adapter, SQLite state, streamed progress summaries, continuation, cancellation, local CLI/API, tests and documentation.
-- **Phase 2:** rich dashboard, diff/test visualization, robust independent verification, UI/E2E coverage.
+- **Phase 1 verified:** registered Git roots, read-only Codex SDK adapter, SQLite state, streamed progress summaries, continuation, cancellation, local CLI/API, tests and documentation. Authenticated real start and continuation were smoke-tested against a disposable repository.
+- **Phase 2 implemented:** local React dashboard, repository/task views, event polling, session continuation, reports, observed command results and read-only Git diff view.
+- **Still needed:** independent test execution/evidence, task-scoped diff snapshots, browser-level UI/E2E coverage.
 - **Phase 3:** authenticated MCP interface and supported ChatGPT integration, with strict read-only/write tool annotations.
 - **Phase 4:** explicit-approval workspace-write tasks, isolated worktrees, secure deployment workflow and service hardening.
 
@@ -92,7 +100,7 @@ The word *bridge* does not mean an existing ChatGPT browser session can call the
 
 ## Tests
 
-`npm test` builds TypeScript and runs the Node test runner against mock Codex sessions. It tests idempotency, cancellation, thread resume, restart recovery, path validation, bearer-token enforcement, and browser origin rejection. A real Codex session is intentionally **not part of automated CI** because it needs authenticated credentials and can incur usage costs.
+`npm test` type-checks the backend and dashboard, builds the frontend, and runs the Node test runner against mock Codex sessions. It tests idempotency, cancellation, thread resume, restart recovery, path validation, bearer-token enforcement, browser origin rejection, dashboard serving and bounded diff access. A real Codex session is intentionally **not part of automated CI** because it needs authenticated credentials and can incur usage costs. The dashboard's report labels SDK-observed command exits; it does not independently run or validate tests.
 
 ## License
 

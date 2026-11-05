@@ -1,14 +1,5 @@
-import type { AgentRunner, AgentTurn, AgentEvent } from "./types.js";
-
-type SDKThread = {
-  id: string | null;
-  runStreamed(input: string, options?: { signal?: AbortSignal }): Promise<{ events: AsyncIterable<AgentEvent> }>;
-};
-type SDKCodex = {
-  startThread(options: Record<string, unknown>): SDKThread;
-  resumeThread(id: string, options: Record<string, unknown>): SDKThread;
-};
-type SDKConstructor = new () => SDKCodex;
+import { Codex, type Thread, type ThreadEvent, type ThreadOptions } from "@openai/codex-sdk";
+import type { AgentRunner, AgentTurn } from "./types.js";
 
 /**
  * Adapter to OpenAI's official Codex SDK. Deliberately read-only for Phase 1:
@@ -16,21 +7,10 @@ type SDKConstructor = new () => SDKCodex;
  * A future workspace-write mode must use explicit per-task user approval.
  */
 export class CodexRunner implements AgentRunner {
-  private client: SDKCodex | null = null;
-
-  private async codex(): Promise<SDKCodex> {
-    if (!this.client) {
-      // Install @openai/codex-sdk + @openai/codex on the user's Mac.
-      const packageName = "@openai/codex-sdk";
-      const sdk = await import(packageName) as { Codex: SDKConstructor };
-      this.client = new sdk.Codex();
-    }
-    return this.client;
-  }
+  private readonly client = new Codex();
 
   async run(request: { workingDirectory: string; prompt: string; threadId: string | null; signal: AbortSignal }): Promise<AgentTurn> {
-    const sdk = await this.codex();
-    const opts = {
+    const opts: ThreadOptions = {
       workingDirectory: request.workingDirectory,
       skipGitRepoCheck: false,
       sandboxMode: "read-only",
@@ -38,8 +18,8 @@ export class CodexRunner implements AgentRunner {
       networkAccessEnabled: false,
       webSearchMode: "disabled"
     };
-    const thread = request.threadId ? sdk.resumeThread(request.threadId, opts) : sdk.startThread(opts);
+    const thread: Thread = request.threadId ? this.client.resumeThread(request.threadId, opts) : this.client.startThread(opts);
     const stream = await thread.runStreamed(request.prompt, { signal: request.signal });
-    return { events: stream.events, getThreadId: () => thread.id };
+    return { events: stream.events as AsyncIterable<ThreadEvent>, getThreadId: () => thread.id };
   }
 }
