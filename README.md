@@ -2,7 +2,7 @@
 
 A private, **local-first bridge** for supervising an OpenAI Codex coding session and retrieving structured task reports. Built for Node.js on macOS. **Phase 1 is read-only**: no remote project writes, Git pushes, deployments or arbitrary shell endpoint.
 
-> **Implementation status:** Local CLI, bearer-authenticated JSON API, SQLite task engine, official Codex SDK adapter, and React dashboard are implemented. The dashboard is served by the same authenticated loopback API. ChatGPT/MCP connectivity is not implemented.
+> **Implementation status:** Local CLI, bearer-authenticated JSON API, SQLite task engine, official Codex SDK adapter, React dashboard, and scoped authenticated MCP endpoint are implemented. The MCP endpoint is loopback-only and intended for a private Secure MCP Tunnel; it does not replace or publicly expose the local API.
 
 ## Prerequisites
 
@@ -40,6 +40,8 @@ npm run bridge -- serve
 # In another terminal, print the token when needed:
 npm run bridge -- token
 ```
+
+Phase 3 MCP setup, permissions, tunnel configuration, ChatGPT limitations, verification commands and recovery steps are documented in [docs/PHASE3-MCP.md](docs/PHASE3-MCP.md).
 
 The first live run requires working Codex auth and network access to the model provider. To use Codex from the terminal, follow its official CLI sign-in instructions. Never commit credentials. The `--` in `npm run bridge --` forwards the remaining arguments to the CLI.
 
@@ -92,15 +94,15 @@ Per-project execution locks prevent simultaneous Codex turns in one registered r
 
 - **Phase 1 verified:** registered Git roots, read-only Codex SDK adapter, SQLite state, streamed progress summaries, continuation, cancellation, local CLI/API, tests and documentation. Authenticated real start and continuation were smoke-tested against a disposable repository.
 - **Phase 2 implemented:** local React dashboard, repository/task views, event polling, session continuation, reports, observed command results and read-only Git diff view.
-- **Still needed:** independent test execution/evidence, task-scoped diff snapshots, browser-level UI/E2E coverage.
-- **Phase 3:** authenticated MCP interface and supported ChatGPT integration, with strict read-only/write tool annotations.
+- **Phase 2 verified:** dashboard smoke coverage includes connecting, selecting a repository, submitting a mock task, viewing events and a report; bearer redirects are checked.
+- **Phase 3 implemented locally:** authenticated MCP tools with project IDs, scope enforcement, bounded/redacted output, persisted rate limits and audit, async polling, and read-only Codex execution. Secure Tunnel and ChatGPT account setup remain environment-specific and were not verified here.
 - **Phase 4:** explicit-approval workspace-write tasks, isolated worktrees, secure deployment workflow and service hardening.
 
-The word *bridge* does not mean an existing ChatGPT browser session can call the local daemon today. That requires Phase 3 plus an eligible ChatGPT environment and a secure remote MCP connection. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SECURITY.md](docs/SECURITY.md).
+An existing ChatGPT browser session can call the local daemon only after Secure MCP Tunnel and an eligible ChatGPT workspace are configured. See [docs/PHASE3-MCP.md](docs/PHASE3-MCP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Tests
 
-`npm test` type-checks the backend and dashboard, builds the frontend, and runs the Node test runner against mock Codex sessions. It tests idempotency, cancellation, thread resume, restart recovery, path validation, bearer-token enforcement, browser origin rejection, dashboard serving and bounded diff access. A real Codex session is intentionally **not part of automated CI** because it needs authenticated credentials and can incur usage costs. The dashboard's report labels SDK-observed command exits; it does not independently run or validate tests.
+`npm test` type-checks the backend and dashboard, builds the frontend, and runs Node tests against mock Codex sessions and a real MCP client. It tests idempotency, cancellation, thread resume, restart recovery, path validation, bearer-token enforcement, browser origin rejection, dashboard serving, MCP scopes/limits/audit and bounded outputs. A real Codex session is opt-in with `npm run test:mcp:real` because it needs authenticated credentials and may incur usage costs. The dashboard's report labels SDK-observed command exits; it does not independently run or validate tests.
 
 The complete test command also runs the Playwright dashboard smoke test. Install its browser once with `npx playwright install chromium`; the browser test mocks API responses and verifies every bearer-authenticated request stays on the dashboard origin.
 

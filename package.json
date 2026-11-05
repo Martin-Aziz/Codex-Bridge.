@@ -10,13 +10,18 @@
     "build": "npm run check && tsc -p tsconfig.json && vite build",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.e2e.json",
     "test": "npm run build && node --disable-warning=ExperimentalWarning --experimental-sqlite --test dist/tests/*.test.js && npm run test:e2e",
+    "test:mcp": "npm run build && node --disable-warning=ExperimentalWarning --experimental-sqlite --test dist/tests/mcp.test.js",
+    "test:mcp:real": "npm run build && RUN_REAL_CODEX_MCP=1 node --disable-warning=ExperimentalWarning --experimental-sqlite --test --test-name-pattern='real authenticated Codex' dist/tests/mcp.test.js",
     "dev": "vite --host 127.0.0.1",
     "bridge": "node --experimental-sqlite dist/src/cli.js",
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@openai/codex": "latest",
     "@openai/codex-sdk": "latest",
+    "jose": "^6.2.15",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
