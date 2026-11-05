@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
 import { Store } from "../src/store.js";
 import { TaskEngine } from "../src/engine.js";
 import { redact, validatePrompt } from "../src/security.js";
@@ -136,5 +138,67 @@ test("persisted database uses private file permissions", async () => {
   try {
     const { stat } = await import("node:fs/promises");
     assert.equal((await stat(join(f.dir, "tasks.sqlite"))).mode & 0o777, 0o600);
+  } finally { await f.cleanup(); }
+});
+
+test("multiple bridge processes serialize task creation and keep live stale-heartbeat leases", async () => {
+  const f = await fixture();
+  const children: ChildProcess[] = [];
+  const helper = join(process.cwd(), "dist/tests/helpers/concurrency-child.js");
+  const launch = (mode = "submit") => {
+    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--experimental-sqlite", helper,
+      mode, join(f.dir, "tasks.sqlite"), f.project.id], { stdio: ["ignore", "pipe", "pipe"] });
+    children.push(child);
+    let output = "";
+    child.stdout!.on("data", chunk => { output += chunk.toString(); });
+    child.stderr!.on("data", chunk => { output += chunk.toString(); });
+    const line = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Child process timed out: ${output}`)), 10_000);
+      child.stdout!.on("data", chunk => {
+        const index = output.indexOf("\n");
+        if (index >= 0) { clearTimeout(timer); resolve(output.slice(0, index)); }
+      });
+      child.once("error", error => { clearTimeout(timer); reject(error); });
+      child.once("exit", code => { if (code !== 0) { clearTimeout(timer); reject(new Error(`Child exited ${code}: ${output}`)); } });
+    });
+    return { child, line };
+  };
+  try {
+    const contenders = Array.from({ length: 6 }, () => launch());
+    const outcomes = await Promise.all(contenders.map(async contender => JSON.parse(await contender.line) as { status: string; id?: string; code?: string }));
+    assert.equal(outcomes.filter(result => result.status === "SUBMITTED").length, 1);
+    assert.equal(outcomes.filter(result => result.status === "REJECTED" && result.code === "PROJECT_BUSY").length, 5);
+    const winner = outcomes.find(result => result.status === "SUBMITTED")!;
+
+    const rawDb = new DatabaseSync(join(f.dir, "tasks.sqlite"));
+    rawDb.prepare("UPDATE project_locks SET heartbeatAt=? WHERE taskId=?").run("2000-01-01T00:00:00.000Z", winner.id!);
+    rawDb.close();
+    const afterSleep = launch();
+    const staleOutcome = JSON.parse(await afterSleep.line) as { status: string; code?: string };
+    assert.deepEqual(staleOutcome, { status: "REJECTED", code: "PROJECT_BUSY" });
+
+    const liveChild = contenders[outcomes.findIndex(result => result.status === "SUBMITTED")]!.child;
+    liveChild.kill("SIGKILL");
+    await once(liveChild, "exit");
+    const inspect = launch("inspect");
+    const tasks = JSON.parse(await inspect.line) as { id: string; status: string }[];
+    assert.equal(tasks.find(task => task.id === winner.id)?.status, "INTERRUPTED");
+    await once(inspect.child, "exit");
+  } finally {
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await f.cleanup();
+  }
+});
+
+test("a former lease owner cannot change a task after its reservation changes", async () => {
+  const f = await fixture();
+  try {
+    const lease = f.store.createTaskAndReserve(f.project.id, "fenced task", `${process.pid}:lease-one`);
+    assert.equal(lease.created, true);
+    const raw = new DatabaseSync(join(f.dir, "tasks.sqlite"));
+    raw.prepare("UPDATE project_locks SET owner=? WHERE taskId=?").run(`${process.pid}:lease-two`, lease.task.id);
+    raw.close();
+    assert.equal(f.store.updateStatusOwned(lease.task.id, f.project.id, `${process.pid}:lease-one`, "SUCCEEDED", { result: "stale" }), false);
+    assert.equal(f.store.getTask(lease.task.id).status, "QUEUED");
   } finally { await f.cleanup(); }
 });

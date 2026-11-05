@@ -6,3 +6,5 @@ dist/
 *.sqlite-*
 .DS_Store
 coverage/
+playwright-report/
+test-results/

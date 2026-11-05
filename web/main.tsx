@@ -7,7 +7,6 @@ type Report = { task: Task; project: { id: string; name: string }; eventCount: n
 type DiffResult = { diff: string; truncated: boolean };
 
 function App() {
-  const [base, setBase] = useState(localStorage.getItem("bridgeBase") || window.location.origin);
   const [token, setToken] = useState(sessionStorage.getItem("bridgeToken") || "");
   const [connected, setConnected] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -25,7 +24,9 @@ function App() {
   const activeCount = useMemo(() => tasks.filter(t => ["QUEUED", "RUNNING"].includes(t.status)).length, [tasks]);
 
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.body ? { "Content-Type": "application/json" } : {}), ...init.headers } });
+    const target = new URL(path, window.location.origin);
+    if (target.origin !== window.location.origin) throw new Error("Bridge API requests must stay on this local dashboard origin.");
+    const response = await fetch(target, { ...init, redirect: "error", headers: { ...(init.body ? { "Content-Type": "application/json" } : {}), ...init.headers, Authorization: `Bearer ${token}` } });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error((data as { message?: string }).message || `Request failed (${response.status})`);
     return data as T;
@@ -42,7 +43,7 @@ function App() {
     if (!connected) return;
     const timer = window.setInterval(() => void refresh(), 1800);
     return () => window.clearInterval(timer);
-  }, [connected, base, token, selected]);
+  }, [connected, token, selected]);
   useEffect(() => {
     if (!selected || !connected) { setEvents([]); setReport(null); return; }
     let alive = true;
@@ -56,16 +57,16 @@ function App() {
     };
     void load(); const timer = window.setInterval(() => void load(), 1500);
     return () => { alive = false; window.clearInterval(timer); };
-  }, [selected, connected, base, token]);
+  }, [selected, connected, token]);
   useEffect(() => {
     if (!connected || !report) { setDiff(null); return; }
     let alive = true;
     void api<DiffResult>(`/v1/projects/${report.project.id}/diff`).then(value => { if (alive) setDiff(value); }).catch(() => { if (alive) setDiff({diff:"",truncated:false}); });
     return () => { alive = false; };
-  }, [connected, report?.project.id, base, token]);
+  }, [connected, report?.project.id, token]);
   async function connect() {
-    sessionStorage.setItem("bridgeToken", token); localStorage.setItem("bridgeBase", base.replace(/\/$/, ""));
-    setBase(base.replace(/\/$/, "")); setBusy(true); await refresh(); setBusy(false);
+    sessionStorage.setItem("bridgeToken", token);
+    setBusy(true); await refresh(); setBusy(false);
   }
   async function submit(continuing = false) {
     if (!prompt.trim()) return;
@@ -89,8 +90,8 @@ function App() {
       <div className="side-footer"><span className={connected ? "pulse online" : "pulse"}/>{connected ? "Bridge connected" : "Bridge offline"}<small>v0.2.0 · READ ONLY</small></div>
     </aside>
     <main className="main"><header><div className="crumb">Workspace <b>/</b> Overview</div><div className="header-right"><span className={connected ? "status-text online" : "status-text"}><i/> {connected ? "SYSTEM OPERATIONAL" : "DISCONNECTED"}</span><button className="icon-btn" title="Refresh" onClick={() => void refresh()}>↻</button><div className="avatar">MA</div></div></header>
-      <section className="content"><div className="title-row"><div><div className="eyebrow">THURSDAY, NOVEMBER 5, 2026 <span className="live-chip">● LIVE</span></div><h1>Workspace overview</h1><p>Monitor and direct your local Codex sessions.</p></div><button className="primary" onClick={() => document.getElementById("task-prompt")?.focus()}><span>＋</span> New task</button></div>
-        {!connected && <div className="connect card"><div><b>Connect to your local bridge</b><p>Start the bridge API, then provide its bearer token.</p></div><input aria-label="Bridge URL" value={base} onChange={e => setBase(e.target.value)} placeholder="http://127.0.0.1:49441"/><input aria-label="Bearer token" value={token} onChange={e => setToken(e.target.value)} type="password" placeholder="Local bearer token"/><button className="primary" disabled={busy || !token} onClick={() => void connect()}>{busy ? "Connecting…" : "Connect"}</button></div>}
+      <section className="content"><div className="title-row"><div><div className="eyebrow">{new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }).toUpperCase()} <span className="live-chip">● LIVE</span></div><h1>Workspace overview</h1><p>Monitor and direct your local Codex sessions.</p></div><button className="primary" onClick={() => document.getElementById("task-prompt")?.focus()}><span>＋</span> New task</button></div>
+        {!connected && <div className="connect card"><div><b>Connect to your local bridge</b><p>Requests stay on this dashboard’s local origin.</p></div><input aria-label="Bearer token" value={token} onChange={e => setToken(e.target.value)} type="password" placeholder="Local bearer token"/><button className="primary" disabled={busy || !token} onClick={() => void connect()}>{busy ? "Connecting…" : "Connect"}</button></div>}
         {error && <div className="error-banner"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
         <div className="stats"><Stat label="REGISTERED REPOSITORIES" value={projects.length.toString()} detail="Local Git roots" icon="▦"/><Stat label="ACTIVE TASKS" value={activeCount.toString().padStart(2,"0")} detail="Across all repositories" icon="◷" active={activeCount>0}/><Stat label="COMPLETED TASKS" value={tasks.filter(t=>t.status==="SUCCEEDED").length.toString()} detail="Persisted in local history" icon="✓"/><Stat label="EXECUTION MODE" value="READ-ONLY" detail="Sandbox enforced" icon="⌑"/></div>
         <div className="grid"><section className="card tasks-card"><div className="card-head"><div><h2>Task activity</h2><p>Recent sessions from your registered repositories</p></div><span className="count">{tasks.length} TASKS</span></div>

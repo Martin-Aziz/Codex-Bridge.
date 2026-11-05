@@ -35,9 +35,9 @@ export class TaskEngine {
       return existing;
     }
     this.requireIdle(project.id);
-    const task = this.store.createTask(project.id, instruction, idempotencyKey);
-    this.schedule(task);
-    return task;
+    const reservation = this.store.createTaskAndReserve(project.id, instruction, this.owner, idempotencyKey);
+    if (reservation.created) this.schedule(reservation.task);
+    return reservation.task;
   }
 
   continueTask(sourceTaskId: string, prompt: string, key: string | null = null): Task {
@@ -54,9 +54,9 @@ export class TaskEngine {
       return existing;
     }
     this.requireIdle(previous.projectId);
-    const task = this.store.createTask(previous.projectId, instruction, idempotencyKey, previous.threadId, previous.id);
-    this.schedule(task);
-    return task;
+    const reservation = this.store.createTaskAndReserve(previous.projectId, instruction, this.owner, idempotencyKey, previous.threadId, previous.id);
+    if (reservation.created) this.schedule(reservation.task);
+    return reservation.task;
   }
 
   cancelTask(taskId: string): Task {
@@ -65,7 +65,7 @@ export class TaskEngine {
     if (!work || work.taskId !== task.id || !["RUNNING", "QUEUED"].includes(task.status))
       throw new BridgeError("NOT_ACTIVE", "Task is not active in this bridge process");
     work.abort.abort();
-    this.store.appendEvent(task.id, "task.cancel_requested", "User requested cancellation");
+    this.store.appendEventOwned(task.id, task.projectId, this.owner, "task.cancel_requested", "User requested cancellation");
     return this.store.getTask(task.id);
   }
 
@@ -115,12 +115,10 @@ export class TaskEngine {
 
   private schedule(task: Task): void {
     const abort = new AbortController();
-    // Reserve the project synchronously: two API requests cannot start overlapping Codex turns.
-    if (!this.store.reserveProject(task.projectId, task.id, this.owner)) {
-      this.store.updateStatus(task.id, "FAILED", { error: "Project is already running another task" });
-      throw new BridgeError("PROJECT_BUSY", "A task is already running for this project");
-    }
-    const heartbeat = setInterval(() => this.store.touchProject(task.projectId, task.id, this.owner), 10_000);
+    // Task insertion and this lease were committed together before scheduling the agent turn.
+    const heartbeat = setInterval(() => {
+      try { this.store.touchProject(task.projectId, task.id, this.owner); } catch { /* The live process keeps ownership even when a heartbeat write is delayed. */ }
+    }, 10_000);
     heartbeat.unref();
     const work = Promise.resolve().then(() => this.execute(task.id, abort));
     this.active.set(task.projectId, { taskId: task.id, abort, work });
@@ -129,7 +127,7 @@ export class TaskEngine {
       clearInterval(heartbeat);
       const current = this.active.get(task.projectId);
       if (current?.taskId === task.id) this.active.delete(task.projectId);
-      this.store.releaseProject(task.projectId, task.id);
+      this.store.releaseProject(task.projectId, task.id, this.owner);
       this.pending.delete(task.id);
     };
     void work.then(cleanup, cleanup);
@@ -143,18 +141,18 @@ export class TaskEngine {
       // The registered path may have moved or been replaced since registration.
       const currentPath = await validateProjectPath(project.path);
       if (currentPath !== project.path) throw new BridgeError("PROJECT_CHANGED", "Project real path changed");
-      this.store.updateStatus(task.id, "RUNNING");
-      this.store.appendEvent(task.id, "task.running", "Codex task started in read-only mode");
+      if (!this.store.updateStatusOwned(task.id, task.projectId, this.owner, "RUNNING")) return;
+      this.store.appendEventOwned(task.id, task.projectId, this.owner, "task.running", "Codex task started in read-only mode");
       const turn = await this.agent.run({ workingDirectory: project.path, prompt: task.prompt,
         threadId: task.threadId, signal: abort.signal });
-      if (turn.getThreadId()) this.store.setThread(task.id, turn.getThreadId()!);
+      if (turn.getThreadId()) this.store.setThreadOwned(task.id, task.projectId, this.owner, turn.getThreadId()!);
       let complete = false;
       let finalResponse = "";
       for await (const event of turn.events) {
         if (abort.signal.aborted) throw new DOMException("Cancelled", "AbortError");
-        if (event.type === "thread.started" && event.thread_id) this.store.setThread(task.id, event.thread_id);
+        if (event.type === "thread.started" && event.thread_id && !this.store.setThreadOwned(task.id, task.projectId, this.owner, event.thread_id)) return;
         const { type, detail } = summarizeEvent(event);
-        if (type !== "unknown") this.store.appendEvent(task.id, type, detail);
+        if (type !== "unknown" && !this.store.appendEventOwned(task.id, task.projectId, this.owner, type, detail)) return;
         if (event.type === "item.completed" && event.item?.type === "agent_message") {
           finalResponse = redact(event.item.text ?? "", 20_000);
         }
@@ -164,19 +162,19 @@ export class TaskEngine {
         if (event.type === "turn.completed") complete = true;
       }
       const resumedId = turn.getThreadId();
-      if (resumedId) this.store.setThread(task.id, resumedId);
+      if (resumedId && !this.store.setThreadOwned(task.id, task.projectId, this.owner, resumedId)) return;
       if (abort.signal.aborted) throw new DOMException("Cancelled", "AbortError");
       if (!complete) throw new BridgeError("INCOMPLETE_STREAM", "Codex event stream ended without turn.completed");
-      this.store.updateStatus(task.id, "SUCCEEDED", { result: finalResponse });
-      this.store.appendEvent(task.id, "task.succeeded", "Task completed successfully");
+      if (!this.store.updateStatusOwned(task.id, task.projectId, this.owner, "SUCCEEDED", { result: finalResponse })) return;
+      this.store.appendEventOwned(task.id, task.projectId, this.owner, "task.succeeded", "Task completed successfully");
     } catch (error) {
       if (abort.signal.aborted) {
-        this.store.updateStatus(task.id, "CANCELLED", { error: "Cancelled by user" });
-        this.store.appendEvent(task.id, "task.cancelled", "Task cancelled by user");
+        if (!this.store.updateStatusOwned(task.id, task.projectId, this.owner, "CANCELLED", { error: "Cancelled by user" })) return;
+        this.store.appendEventOwned(task.id, task.projectId, this.owner, "task.cancelled", "Task cancelled by user");
       } else {
         const reason = error instanceof Error ? error.message : "Unknown error";
-        this.store.updateStatus(task.id, "FAILED", { error: redact(reason) });
-        this.store.appendEvent(task.id, "task.failed", redact(reason));
+        if (!this.store.updateStatusOwned(task.id, task.projectId, this.owner, "FAILED", { error: redact(reason) })) return;
+        this.store.appendEventOwned(task.id, task.projectId, this.owner, "task.failed", redact(reason));
       }
     }
   }

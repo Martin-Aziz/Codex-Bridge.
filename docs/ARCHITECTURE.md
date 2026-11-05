@@ -14,7 +14,7 @@ ChatGPT (eligible custom MCP tools) â†’ authenticated remote MCP proxy/tunnel â†
 - `src/security.ts`: git-root validation, input constraints, event field allowlist and best-effort secret redaction.
 - `web/`: React dashboard built into `dist/public` and served by the same local API, so browser calls remain same-origin and use the existing bearer token.
 - `GET /v1/projects/:id/diff`: fixed-argument, bounded Git diff against `HEAD`; it does not accept shell commands or repository paths from the caller.
-- SQLite project reservations coordinate concurrent bridge processes. PID liveness plus a short heartbeat lease recovers abandoned active tasks after restart.
+- Task creation and project reservation commit together in a SQLite `BEGIN IMMEDIATE` transaction; startup recovery takes the same write lock so it cannot interrupt a task between insert and reservation. A live owner PID retains its lock across long sleeps even if the heartbeat is old. Mutations and release are fenced by task and owner identity.
 
 The SQLite backing store uses the built-in `node:sqlite` module (Node 22.13+). The project now commits `package-lock.json`; install with `npm ci` for repeatable dependencies.
 

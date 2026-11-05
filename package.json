@@ -8,10 +8,11 @@
   },
   "scripts": {
     "build": "npm run check && tsc -p tsconfig.json && vite build",
-    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json",
-    "test": "npm run build && node --disable-warning=ExperimentalWarning --experimental-sqlite --test dist/tests/*.test.js",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.e2e.json",
+    "test": "npm run build && node --disable-warning=ExperimentalWarning --experimental-sqlite --test dist/tests/*.test.js && npm run test:e2e",
     "dev": "vite --host 127.0.0.1",
-    "bridge": "node --experimental-sqlite dist/src/cli.js"
+    "bridge": "node --experimental-sqlite dist/src/cli.js",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@openai/codex": "latest",
@@ -20,6 +21,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.15.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

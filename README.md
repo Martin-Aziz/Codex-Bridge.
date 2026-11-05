@@ -102,6 +102,8 @@ The word *bridge* does not mean an existing ChatGPT browser session can call the
 
 `npm test` type-checks the backend and dashboard, builds the frontend, and runs the Node test runner against mock Codex sessions. It tests idempotency, cancellation, thread resume, restart recovery, path validation, bearer-token enforcement, browser origin rejection, dashboard serving and bounded diff access. A real Codex session is intentionally **not part of automated CI** because it needs authenticated credentials and can incur usage costs. The dashboard's report labels SDK-observed command exits; it does not independently run or validate tests.
 
+The complete test command also runs the Playwright dashboard smoke test. Install its browser once with `npx playwright install chromium`; the browser test mocks API responses and verifies every bearer-authenticated request stays on the dashboard origin.
+
 ## License
 
 MIT for project source code. The name and official Codex SDK belong to their respective owners; this is an independent project, not an official OpenAI product.
