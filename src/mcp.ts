@@ -11,6 +11,15 @@ export type McpIdentity = { subject: string; clientId: string; scopes: string[];
 export type TokenVerifier = (token: string) => Promise<McpIdentity>;
 const MAX_RESULT = 12_000;
 const OUTPUT_CAP = 50_000;
+const allScopes = ["projects:read", "tasks:read", "tasks:start", "tasks:continue", "tasks:cancel"];
+
+function unauthorized(metadataPath: string, resource: URL): Response {
+  const metadata = new URL(metadataPath, resource).href;
+  return new Response("Unauthorized", { status: 401, headers: {
+    "WWW-Authenticate": `Bearer error="invalid_token", resource_metadata="${metadata}", scope="${allScopes.join(" ")}"`,
+    "Cache-Control": "no-store",
+  } });
+}
 
 function principalId(subject: string): string { return createHash("sha256").update(subject).digest("hex").slice(0, 32); }
 function jsonText(value: unknown): { content: [{ type: "text"; text: string }]; structuredContent: Record<string, unknown> } {
@@ -33,7 +42,8 @@ function toolError(message: string): { isError: true; content: [{ type: "text"; 
 }
 
 export function createJwtVerifier(config: { issuer: string; jwksUrl: string; audience: string }): TokenVerifier {
-  const issuer = new URL(config.issuer).toString().replace(/\/$/, "");
+  // OIDC issuer identifiers are exact strings; Auth0 commonly includes a trailing slash.
+  const issuer = config.issuer;
   const audience = new URL(config.audience).toString();
   const jwks = createRemoteJWKSet(new URL(config.jwksUrl));
   return async token => {
@@ -46,8 +56,13 @@ export function createJwtVerifier(config: { issuer: string; jwksUrl: string; aud
   };
 }
 
-export function createMcpHttpHandler(engine: TaskEngine, verifier: TokenVerifier, audience: string) {
+export type McpServerOptions = { issuer?: string; resource?: string; allowedSubjects?: string[] };
+
+export function createMcpHttpHandler(engine: TaskEngine, verifier: TokenVerifier, audience: string, options: McpServerOptions = {}) {
   const resource = new URL(audience);
+  const metadataResource = new URL(options.resource ?? audience);
+  const resourceMetadataPath = `/.well-known/oauth-protected-resource${metadataResource.pathname === "/" ? "" : metadataResource.pathname}`;
+  const rootMetadataPath = "/.well-known/oauth-protected-resource";
   const factory = ({ authInfo }: { authInfo?: AuthInfo }) => {
     const server = new McpServer({ name: "codex-bridge", version: "0.3.0" });
     const auth = authInfo;
@@ -85,8 +100,8 @@ export function createMcpHttpHandler(engine: TaskEngine, verifier: TokenVerifier
         eventCount: report.eventCount, observedCommands: report.observedCommands.slice(0, 25).map(c => ({ command: sanitizeProjectText(c.command, projectPath, 500), result: c.result })), verification: report.verification };
     });
     define("get_task_events", "tasks:read", "read", z.object({ taskId: z.string().regex(/^[a-f0-9]{32}$/), after: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict(), a => {
-      const events = engine.events(a.taskId as string, a.after as number);
       const limit = a.limit as number;
+      const events = engine.events(a.taskId as string, a.after as number, limit + 1);
       const projectPath = engine.store.getProject(engine.getTask(a.taskId as string).projectId).path;
       return { events: events.slice(0, limit).map(e => ({ id: e.id, type: e.type, detail: sanitizeProjectText(e.detail, projectPath, 400), createdAt: e.createdAt })),
         nextCursor: events.length > limit ? events[limit - 1]?.id ?? a.after : null };
@@ -99,25 +114,26 @@ export function createMcpHttpHandler(engine: TaskEngine, verifier: TokenVerifier
       const task = engine.continueTask(a.taskId as string, a.prompt as string, (a.idempotencyKey as string | undefined) ?? null);
       return { ...safeTask(task), accepted: true, pollTool: "get_task_status" };
     });
-    define("cancel_task", "tasks:cancel", "write", z.object({ taskId: z.string().regex(/^[a-f0-9]{32}$/) }), a => safeTask(engine.cancelTask(a.taskId as string)));
+    define("cancel_task", "tasks:cancel", "write", z.object({ taskId: z.string().regex(/^[a-f0-9]{32}$/) }).strict(), a => safeTask(engine.cancelTask(a.taskId as string)));
     return server;
   };
   const mcp = createMcpHandler(factory, { legacy: "stateless", maxRequestBodySize: 64_000, responseMode: "json" });
   return {
     async fetch(request: Request): Promise<Response> {
-      if (request.method === "GET" && new URL(request.url).pathname === new URL("/.well-known/oauth-protected-resource", resource).pathname) {
-        const issuer = process.env.MCP_OAUTH_ISSUER;
-        return Response.json({ resource: resource.href, ...(issuer ? { authorization_servers: [issuer] } : {}), bearer_methods_supported: ["header"], scopes_supported: ["projects:read", "tasks:read", "tasks:start", "tasks:continue", "tasks:cancel"] }, { headers: { "Cache-Control": "no-store" } });
+      if (request.method === "GET" && [resourceMetadataPath, rootMetadataPath].includes(new URL(request.url).pathname)) {
+        const issuer = options.issuer ?? process.env.MCP_OAUTH_ISSUER;
+        return Response.json({ resource: metadataResource.href, ...(issuer ? { authorization_servers: [issuer] } : {}), bearer_methods_supported: ["header"], scopes_supported: allScopes, scope: allScopes.join(" ") }, { headers: { "Cache-Control": "no-store" } });
       }
       if (new URL(request.url).pathname !== "/mcp") return new Response("Not found", { status: 404 });
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
       const header = request.headers.get("authorization") ?? "";
       const match = /^Bearer ([^\s]{16,8192})$/.exec(header);
-      if (!match) return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": `Bearer resource_metadata="${new URL("/.well-known/oauth-protected-resource", resource).href}"` } });
+      if (!match) return unauthorized(resourceMetadataPath, metadataResource);
       let identity: McpIdentity;
       try { identity = await verifier(match[1]!); }
-      catch { return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": `Bearer resource_metadata="${new URL("/.well-known/oauth-protected-resource", resource).href}"` } }); }
-      if (identity.resource !== resource.href || !identity.clientId || !identity.subject || identity.expiresAt <= Math.floor(Date.now() / 1000)) return new Response("Unauthorized", { status: 401 });
+      catch { return unauthorized(resourceMetadataPath, metadataResource); }
+      if (identity.resource !== resource.href || !identity.clientId || !identity.subject || identity.expiresAt <= Math.floor(Date.now() / 1000) ||
+          (options.allowedSubjects && !options.allowedSubjects.includes(identity.subject))) return unauthorized(resourceMetadataPath, metadataResource);
       const authInfo: AuthInfo = { token: "[verified]", clientId: `${identity.clientId}:${identity.subject}`, scopes: identity.scopes, expiresAt: identity.expiresAt, resource };
       return mcp.fetch(request, { authInfo });
     }, close: mcp.close,
@@ -143,8 +159,8 @@ function sendWebResponse(res: ServerResponse, response: Response): void {
   res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
   void response.arrayBuffer().then(body => res.end(Buffer.from(body)), () => res.end());
 }
-export function createMcpHttpServer(engine: TaskEngine, verifier: TokenVerifier, audience: string): Server {
-  const handler = createMcpHttpHandler(engine, verifier, audience);
+export function createMcpHttpServer(engine: TaskEngine, verifier: TokenVerifier, audience: string, options: McpServerOptions = {}): Server {
+  const handler = createMcpHttpHandler(engine, verifier, audience, options);
   const server = createServer(async (req, res) => {
     try {
       if (!req.url || req.headers.host !== `127.0.0.1:${req.socket.localPort}`) { res.writeHead(403).end(); return; }
@@ -158,10 +174,12 @@ export function createMcpHttpServer(engine: TaskEngine, verifier: TokenVerifier,
   return server;
 }
 
-export function requireMcpConfiguration(env: NodeJS.ProcessEnv = process.env): { issuer: string; jwksUrl: string; audience: string } {
+export function requireMcpConfiguration(env: NodeJS.ProcessEnv = process.env): { issuer: string; jwksUrl: string; audience: string; resource: string; allowedSubjects: string[] } {
   const issuer = env.MCP_OAUTH_ISSUER, jwksUrl = env.MCP_OAUTH_JWKS_URL, audience = env.MCP_OAUTH_AUDIENCE;
-  if (!issuer || !jwksUrl || !audience) throw new Error("Set MCP_OAUTH_ISSUER, MCP_OAUTH_JWKS_URL, and MCP_OAUTH_AUDIENCE before starting MCP mode");
-  for (const value of [issuer, jwksUrl, audience]) { const url = new URL(value); if (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname)) throw new Error("MCP auth URLs must use HTTPS except local test issuers"); }
-  return { issuer, jwksUrl, audience };
+  const resource = env.MCP_OAUTH_RESOURCE;
+  const allowedSubjects = env.MCP_ALLOWED_SUBJECTS?.split(",").map(value => value.trim()).filter(Boolean) ?? [];
+  if (!issuer || !jwksUrl || !audience || !resource || allowedSubjects.length === 0) throw new Error("Set MCP_OAUTH_ISSUER, MCP_OAUTH_JWKS_URL, MCP_OAUTH_AUDIENCE, MCP_OAUTH_RESOURCE, and at least one MCP_ALLOWED_SUBJECTS value before starting MCP mode");
+  for (const value of [issuer, jwksUrl, audience, resource]) { const url = new URL(value); if (url.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(url.hostname)) throw new Error("MCP auth URLs must use HTTPS except local test issuers"); }
+  return { issuer, jwksUrl, audience, resource, allowedSubjects };
 }
 

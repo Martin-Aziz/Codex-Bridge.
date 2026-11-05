@@ -212,10 +212,11 @@ export class Store {
       return true;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  events(taskId: string, after = 0): StoredEvent[] {
+  events(taskId: string, after = 0, limit = 300): StoredEvent[] {
     this.getTask(taskId);
-    return this.db.prepare("SELECT * FROM events WHERE taskId=? AND id>? ORDER BY id LIMIT 300")
-      .all(taskId, after) as unknown as StoredEvent[];
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new BridgeError("INVALID_LIMIT", "Invalid event page size");
+    return this.db.prepare("SELECT * FROM events WHERE taskId=? AND id>? ORDER BY id LIMIT ?")
+      .all(taskId, after, limit) as unknown as StoredEvent[];
   }
   auditMcp(principal: string, tool: string, outcome: string, taskId: string | null = null): void {
     this.db.prepare("INSERT INTO mcp_audit(principal,tool,outcome,taskId,createdAt) VALUES(?,?,?,?,?)")
