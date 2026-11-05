@@ -1,10 +1,12 @@
 import { Store } from "./store.js";
 import { BridgeError, redact, summarizeEvent, validateId, validateProjectPath, validatePrompt } from "./security.js";
 import type { AgentRunner, Project, Task, StoredEvent } from "./types.js";
+import { randomUUID } from "node:crypto";
 
 export class TaskEngine {
   private readonly active = new Map<string, { taskId: string; abort: AbortController; work: Promise<void> }>();
   private readonly pending = new Map<string, Promise<void>>();
+  private readonly owner = `${process.pid}:${randomUUID()}`;
 
   constructor(public readonly store: Store, private readonly agent: AgentRunner) {}
 
@@ -25,14 +27,15 @@ export class TaskEngine {
   submit(projectId: string, prompt: string, key: string | null = null): Task {
     const project = this.store.getProject(validateId(projectId));
     const instruction = validatePrompt(prompt);
-    const existing = key ? this.store.findByKey(key) : undefined;
+    const idempotencyKey = this.validateKey(key);
+    const existing = idempotencyKey ? this.store.findByKey(idempotencyKey) : undefined;
     if (existing) {
       if (existing.projectId !== project.id || existing.prompt !== instruction || existing.parentTaskId !== null)
         throw new BridgeError("IDEMPOTENCY_CONFLICT", "Key already used for different task");
       return existing;
     }
     this.requireIdle(project.id);
-    const task = this.store.createTask(project.id, instruction, this.validateKey(key));
+    const task = this.store.createTask(project.id, instruction, idempotencyKey);
     this.schedule(task);
     return task;
   }
@@ -40,17 +43,18 @@ export class TaskEngine {
   continueTask(sourceTaskId: string, prompt: string, key: string | null = null): Task {
     const previous = this.getTask(sourceTaskId);
     const instruction = validatePrompt(prompt);
+    const idempotencyKey = this.validateKey(key);
     if (!previous.threadId) throw new BridgeError("NO_THREAD", "Source task has no resumable Codex thread");
     if (!["SUCCEEDED", "FAILED", "INTERRUPTED"].includes(previous.status))
       throw new BridgeError("NOT_FINISHED", "Cannot continue an active or cancelled task");
-    const existing = key ? this.store.findByKey(key) : undefined;
+    const existing = idempotencyKey ? this.store.findByKey(idempotencyKey) : undefined;
     if (existing) {
       if (existing.projectId !== previous.projectId || existing.prompt !== instruction || existing.parentTaskId !== previous.id)
         throw new BridgeError("IDEMPOTENCY_CONFLICT", "Key already used for different task");
       return existing;
     }
     this.requireIdle(previous.projectId);
-    const task = this.store.createTask(previous.projectId, instruction, this.validateKey(key), previous.threadId, previous.id);
+    const task = this.store.createTask(previous.projectId, instruction, idempotencyKey, previous.threadId, previous.id);
     this.schedule(task);
     return task;
   }
@@ -106,18 +110,26 @@ export class TaskEngine {
   }
 
   private requireIdle(projectId: string): void {
-    if (this.active.has(projectId)) throw new BridgeError("PROJECT_BUSY", "A task is already running for this project");
+    if (this.active.has(projectId) || this.store.projectBusy(projectId)) throw new BridgeError("PROJECT_BUSY", "A task is already running for this project");
   }
 
   private schedule(task: Task): void {
     const abort = new AbortController();
     // Reserve the project synchronously: two API requests cannot start overlapping Codex turns.
+    if (!this.store.reserveProject(task.projectId, task.id, this.owner)) {
+      this.store.updateStatus(task.id, "FAILED", { error: "Project is already running another task" });
+      throw new BridgeError("PROJECT_BUSY", "A task is already running for this project");
+    }
+    const heartbeat = setInterval(() => this.store.touchProject(task.projectId, task.id, this.owner), 10_000);
+    heartbeat.unref();
     const work = Promise.resolve().then(() => this.execute(task.id, abort));
     this.active.set(task.projectId, { taskId: task.id, abort, work });
     this.pending.set(task.id, work);
     const cleanup = () => {
+      clearInterval(heartbeat);
       const current = this.active.get(task.projectId);
       if (current?.taskId === task.id) this.active.delete(task.projectId);
+      this.store.releaseProject(task.projectId, task.id);
       this.pending.delete(task.id);
     };
     void work.then(cleanup, cleanup);
@@ -135,6 +147,7 @@ export class TaskEngine {
       this.store.appendEvent(task.id, "task.running", "Codex task started in read-only mode");
       const turn = await this.agent.run({ workingDirectory: project.path, prompt: task.prompt,
         threadId: task.threadId, signal: abort.signal });
+      if (turn.getThreadId()) this.store.setThread(task.id, turn.getThreadId()!);
       let complete = false;
       let finalResponse = "";
       for await (const event of turn.events) {
@@ -155,12 +168,15 @@ export class TaskEngine {
       if (abort.signal.aborted) throw new DOMException("Cancelled", "AbortError");
       if (!complete) throw new BridgeError("INCOMPLETE_STREAM", "Codex event stream ended without turn.completed");
       this.store.updateStatus(task.id, "SUCCEEDED", { result: finalResponse });
+      this.store.appendEvent(task.id, "task.succeeded", "Task completed successfully");
     } catch (error) {
       if (abort.signal.aborted) {
         this.store.updateStatus(task.id, "CANCELLED", { error: "Cancelled by user" });
+        this.store.appendEvent(task.id, "task.cancelled", "Task cancelled by user");
       } else {
         const reason = error instanceof Error ? error.message : "Unknown error";
         this.store.updateStatus(task.id, "FAILED", { error: redact(reason) });
+        this.store.appendEvent(task.id, "task.failed", redact(reason));
       }
     }
   }

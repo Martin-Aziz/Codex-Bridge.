@@ -5,6 +5,9 @@
 - Default to Codex SDK `sandboxMode: read-only`, `approvalPolicy: never` and network access disabled. No unrestricted command API.
 - Operate only on user-registered Git roots. Paths are canonicalized and revalidated before execution. Remote requests identify a project by ID.
 - Local HTTP is bound to 127.0.0.1 and requires a random bearer token; Host and Origin checks reduce browser-origin abuse and DNS rebinding exposure.
+- The dashboard is served from the API's own loopback origin. Static assets are allowlisted and use a restrictive content security policy; no cross-origin API access is enabled.
+- Project concurrency reservations live in SQLite and use a process liveness check plus heartbeat expiry to recover abandoned work after a crash.
+- The diff endpoint accepts only an opaque project ID and invokes a fixed `git diff HEAD` argument list with external diff/text conversion disabled, inherited `GIT_*` variables removed, a five-second timeout and bounded output.
 - Bearer tokens are generated into a private directory (file mode 0600), never printed except on an explicit `token` command.
 - Idempotency keys, per-repository execution locks, cancellation and interrupt marking prevent common duplicate/execution-state errors.
 - Bounded JSON request size, restricted IDs and input lengths, event allowlisting, best-effort log redaction.

@@ -12,8 +12,11 @@ ChatGPT (eligible custom MCP tools) â†’ authenticated remote MCP proxy/tunnel â†
 - `src/store.ts`: synchronous SQLite data store, restart reconciliation, event timeline.
 - `src/codex.ts`: Codex SDK adapter: `startThread` / `resumeThread`, `runStreamed`, read-only sandbox, network disabled, no approvals.
 - `src/security.ts`: git-root validation, input constraints, event field allowlist and best-effort secret redaction.
+- `web/`: React dashboard built into `dist/public` and served by the same local API, so browser calls remain same-origin and use the existing bearer token.
+- `GET /v1/projects/:id/diff`: fixed-argument, bounded Git diff against `HEAD`; it does not accept shell commands or repository paths from the caller.
+- SQLite project reservations coordinate concurrent bridge processes. PID liveness plus a short heartbeat lease recovers abandoned active tasks after restart.
 
-The SQLite backing store uses the built-in `node:sqlite` module (Node 22.13+). This keeps the local foundation small; production release should pin/test a specific supported Node version and generate a lockfile.
+The SQLite backing store uses the built-in `node:sqlite` module (Node 22.13+). The project now commits `package-lock.json`; install with `npm ci` for repeatable dependencies.
 
 The official TypeScript Codex SDK uses a child CLI process and structured JSONL events; it persists sessions in the Codex home directory. Session IDs are stored in our own SQLite DB. `turn.completed` must be observed before success is recorded.
 
@@ -25,6 +28,7 @@ The official TypeScript Codex SDK uses a child CLI process and structured JSONL 
 - Each task is a single turn; later turns are separate linked tasks, sharing the Codex session ID.
 - SDK events are summarized rather than copied verbatim; output and error text are size-limited and redacted on a best-effort basis.
 - `GET /v1/tasks/:id/report` is not independent test verification; it states that limitation explicitly.
+- The dashboard diff shows tracked changes against `HEAD`, not a snapshot diff attributable to a specific task. Codex runs read-only, so task-attributable changes are not expected.
 
 ## Deferred architecture choices
 
