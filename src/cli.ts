@@ -7,6 +7,7 @@ import { CodexRunner } from "./codex.js";
 import { Store } from "./store.js";
 import { TaskEngine } from "./engine.js";
 import { createBridgeServer, listenLoopback } from "./api.js";
+import { createJwtVerifier, createMcpHttpServer, requireMcpConfiguration } from "./mcp.js";
 
 const home = platform() === "darwin"
   ? join(homedir(), "Library", "Application Support", "CodexBridge")
@@ -40,18 +41,39 @@ function token(): string {
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd === "help" || !cmd) {
-    console.log(`Codex Bridge Phase 1 (read-only)
+    console.log(`Codex Bridge (read-only)
   npm run bridge -- register <absolute-git-repo-path> [display-name]
   npm run bridge -- projects | tasks | report <taskId> | events <taskId>
   npm run bridge -- start <projectId> <instruction>
   npm run bridge -- continue <taskId> <instruction>
   npm run bridge -- serve [port]  # local-only authenticated HTTP API
+  npm run bridge -- mcp-serve [port]  # scoped OAuth MCP endpoint for private tunnels
   npm run bridge -- token         # show local API token; never share it`);
     return;
   }
   if (cmd === "token") { console.log(token()); return; }
   const store = new Store(dbFile);
   const engine = new TaskEngine(store, new CodexRunner());
+  if (cmd === "mcp-serve") {
+    try {
+      const config = requireMcpConfiguration();
+      const server = createMcpHttpServer(engine, createJwtVerifier(config), config.audience);
+      const address = await listenLoopback(server, Number(args[0] ?? "49442"));
+      console.log(`Authenticated MCP endpoint listening only on http://${address.host}:${address.port}/mcp`);
+      console.log(`OAuth issuer: ${config.issuer}; required tool scopes are listed in docs/PHASE3-MCP.md`);
+      let stopping = false;
+      const shutdown = async () => {
+        if (stopping) return;
+        stopping = true;
+        server.close();
+        await engine.shutdown();
+        store.close();
+      };
+      process.once("SIGINT", () => { void shutdown().then(() => { process.exitCode = 0; }); });
+      process.once("SIGTERM", () => { void shutdown().then(() => { process.exitCode = 0; }); });
+      return;
+    } catch (error) { store.close(); throw error; }
+  }
   if (cmd === "serve") {
     const server = createBridgeServer(engine, token());
     const address = await listenLoopback(server, Number(args[0] ?? "49441"));

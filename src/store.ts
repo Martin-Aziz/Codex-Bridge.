@@ -40,6 +40,15 @@ export class Store {
       CREATE TABLE IF NOT EXISTS project_locks (
         projectId TEXT PRIMARY KEY REFERENCES projects(id), taskId TEXT NOT NULL,
         owner TEXT NOT NULL, acquiredAt TEXT NOT NULL, heartbeatAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS mcp_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, tool TEXT NOT NULL,
+        outcome TEXT NOT NULL, taskId TEXT, createdAt TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mcp_audit_recent ON mcp_audit(createdAt);
+      CREATE TABLE IF NOT EXISTS mcp_rate_limits (
+        principal TEXT NOT NULL, bucket TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL,
+        PRIMARY KEY(principal,bucket,window)
       );`);
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -207,6 +216,28 @@ export class Store {
     this.getTask(taskId);
     return this.db.prepare("SELECT * FROM events WHERE taskId=? AND id>? ORDER BY id LIMIT 300")
       .all(taskId, after) as unknown as StoredEvent[];
+  }
+  auditMcp(principal: string, tool: string, outcome: string, taskId: string | null = null): void {
+    this.db.prepare("INSERT INTO mcp_audit(principal,tool,outcome,taskId,createdAt) VALUES(?,?,?,?,?)")
+      .run(principal.slice(0, 160), tool.slice(0, 80), outcome.slice(0, 80), taskId, now());
+  }
+  consumeMcpRate(principal: string, bucket: string, max: number, windowMs = 60_000): boolean {
+    const window = Math.floor(Date.now() / windowMs);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM mcp_rate_limits WHERE window < ?").run(window - 2);
+      const row = this.db.prepare("SELECT count FROM mcp_rate_limits WHERE principal=? AND bucket=? AND window=?")
+        .get(principal, bucket, window) as { count: number } | undefined;
+      if ((row?.count ?? 0) >= max) { this.db.exec("COMMIT"); return false; }
+      this.db.prepare(`INSERT INTO mcp_rate_limits(principal,bucket,window,count) VALUES(?,?,?,1)
+        ON CONFLICT(principal,bucket,window) DO UPDATE SET count=count+1`).run(principal, bucket, window);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  mcpAuditRows(): { principal: string; tool: string; outcome: string; taskId: string | null }[] {
+    return this.db.prepare("SELECT principal,tool,outcome,taskId FROM mcp_audit ORDER BY id")
+      .all() as unknown as { principal: string; tool: string; outcome: string; taskId: string | null }[];
   }
   close(): void { this.db.close(); }
 }
