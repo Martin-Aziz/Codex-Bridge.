@@ -19,9 +19,9 @@ export class TaskEngine {
   listProjects(): Project[] { return this.store.listProjects(); }
   listTasks(): Task[] { return this.store.listTasks(); }
   getTask(id: string): Task { return this.store.getTask(validateId(id)); }
-  events(id: string, after = 0): StoredEvent[] {
+  events(id: string, after = 0, limit = 300): StoredEvent[] {
     if (!Number.isInteger(after) || after < 0) throw new BridgeError("INVALID_CURSOR", "Invalid event cursor");
-    return this.store.events(validateId(id), after);
+    return this.store.events(validateId(id), after, limit);
   }
 
   submit(projectId: string, prompt: string, key: string | null = null): Task {

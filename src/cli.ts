@@ -57,7 +57,7 @@ async function main(): Promise<void> {
   if (cmd === "mcp-serve") {
     try {
       const config = requireMcpConfiguration();
-      const server = createMcpHttpServer(engine, createJwtVerifier(config), config.audience);
+      const server = createMcpHttpServer(engine, createJwtVerifier(config), config.audience, { issuer: config.issuer, resource: config.resource, allowedSubjects: config.allowedSubjects });
       const address = await listenLoopback(server, Number(args[0] ?? "49442"));
       console.log(`Authenticated MCP endpoint listening only on http://${address.host}:${address.port}/mcp`);
       console.log(`OAuth issuer: ${config.issuer}; required tool scopes are listed in docs/PHASE3-MCP.md`);
