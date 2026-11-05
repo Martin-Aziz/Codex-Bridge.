@@ -1,0 +1,21 @@
+{
+  "name": "codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --disable-warning=ExperimentalWarning --experimental-sqlite --test dist/tests/*.test.js",
+    "bridge": "node --experimental-sqlite dist/src/cli.js"
+  },
+  "dependencies": {
+    "@openai/codex": "latest",
+    "@openai/codex-sdk": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.0"
+  }
+}
