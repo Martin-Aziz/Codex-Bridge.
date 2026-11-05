@@ -7,12 +7,19 @@ import type { Project, StoredEvent, Task, TaskStatus } from "./types.js";
 
 function id(): string { return randomUUID().replaceAll("-", ""); }
 function now(): string { return new Date().toISOString(); }
+function ownerIsAlive(owner: string): boolean {
+  const pid = Number(owner.split(":", 1)[0]);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
 
 export class Store {
   private readonly db: DatabaseSync;
   constructor(file: string) {
     if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(file);
+    this.db.exec("PRAGMA busy_timeout=5000;");
     if (file !== ":memory:") chmodSync(file, 0o600);
     this.db.exec(`PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS projects (
@@ -34,40 +41,72 @@ export class Store {
         projectId TEXT PRIMARY KEY REFERENCES projects(id), taskId TEXT NOT NULL,
         owner TEXT NOT NULL, acquiredAt TEXT NOT NULL, heartbeatAt TEXT NOT NULL
       );`);
-    // A dead bridge process cannot reattach to its Codex subprocess; release and interrupt its tasks.
-    const locks = this.db.prepare("SELECT projectId,taskId,owner,heartbeatAt FROM project_locks").all() as unknown as { projectId: string; taskId: string; owner: string; heartbeatAt: string }[];
-    for (const lock of locks) {
-      const pid = Number(lock.owner.split(":", 1)[0]);
-      let alive = Number.isInteger(pid) && pid > 0;
-      if (alive) { try { process.kill(pid, 0); } catch (error) { alive = (error as NodeJS.ErrnoException).code === "EPERM"; } }
-      const stale = Date.now() - Date.parse(lock.heartbeatAt) > 30_000;
-      if (!alive || stale) {
-        this.db.prepare("UPDATE tasks SET status='INTERRUPTED', updatedAt=? WHERE id=? AND status IN ('RUNNING','QUEUED')").run(now(), lock.taskId);
-        this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId=?").run(lock.projectId, lock.taskId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // Startup reconciliation and task registration serialize on SQLite's write lock.
+      const locks = this.db.prepare("SELECT projectId,taskId,owner FROM project_locks").all() as unknown as { projectId: string; taskId: string; owner: string }[];
+      for (const lock of locks) {
+        if (!ownerIsAlive(lock.owner)) {
+          this.db.prepare("UPDATE tasks SET status='INTERRUPTED', updatedAt=? WHERE id=? AND status IN ('RUNNING','QUEUED')").run(now(), lock.taskId);
+          this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").run(lock.projectId, lock.taskId, lock.owner);
+        }
       }
-    }
-    this.db.prepare("UPDATE tasks SET status='INTERRUPTED', updatedAt=? WHERE status IN ('RUNNING','QUEUED') AND id NOT IN (SELECT taskId FROM project_locks)").run(now());
-    this.db.prepare("DELETE FROM project_locks WHERE taskId NOT IN (SELECT id FROM tasks WHERE status IN ('RUNNING','QUEUED'))").run();
+      this.db.prepare("UPDATE tasks SET status='INTERRUPTED', updatedAt=? WHERE status IN ('RUNNING','QUEUED') AND id NOT IN (SELECT taskId FROM project_locks)").run(now());
+      this.db.prepare("DELETE FROM project_locks WHERE taskId NOT IN (SELECT id FROM tasks WHERE status IN ('RUNNING','QUEUED'))").run();
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
-  reserveProject(projectId: string, taskId: string, owner: string): boolean {
-    this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId NOT IN (SELECT id FROM tasks WHERE status IN ('QUEUED','RUNNING'))").run(projectId);
+  createTaskAndReserve(projectId: string, prompt: string, owner: string, key: string | null = null,
+    threadId: string | null = null, parent: string | null = null): { task: Task; created: boolean } {
+    this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.getProject(projectId);
+      if (key) {
+        const old = this.findByKey(key);
+        if (old) {
+          if (old.projectId !== projectId || old.prompt !== prompt || old.parentTaskId !== parent)
+            throw new BridgeError("IDEMPOTENCY_CONFLICT", "Key already used for another request");
+          this.db.exec("COMMIT");
+          return { task: old, created: false };
+        }
+      }
+      const lock = this.db.prepare("SELECT taskId,owner FROM project_locks WHERE projectId=?").get(projectId) as { taskId: string; owner: string } | undefined;
+      if (lock) {
+        const lockedTask = this.db.prepare("SELECT status FROM tasks WHERE id=?").get(lock.taskId) as { status: TaskStatus } | undefined;
+        if (!lockedTask || !["QUEUED", "RUNNING"].includes(lockedTask.status)) {
+          this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").run(projectId, lock.taskId, lock.owner);
+        } else if (!ownerIsAlive(lock.owner)) {
+          this.db.prepare("UPDATE tasks SET status='INTERRUPTED', updatedAt=? WHERE id=? AND status IN ('QUEUED','RUNNING')").run(now(), lock.taskId);
+          this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").run(projectId, lock.taskId, lock.owner);
+        } else {
+          throw new BridgeError("PROJECT_BUSY", "A task is already running for this project");
+        }
+      }
       const timestamp = now();
+      const task: Task = { id: id(), projectId, prompt, status: "QUEUED", threadId, parentTaskId: parent,
+        idempotencyKey: key, result: null, error: null, createdAt: timestamp, updatedAt: timestamp };
+      this.db.prepare(`INSERT INTO tasks (id,projectId,prompt,status,threadId,parentTaskId,idempotencyKey,result,error,createdAt,updatedAt)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(task.id, task.projectId, task.prompt, task.status, task.threadId,
+        task.parentTaskId, task.idempotencyKey, task.result, task.error, task.createdAt, task.updatedAt);
       this.db.prepare("INSERT INTO project_locks(projectId,taskId,owner,acquiredAt,heartbeatAt) VALUES(?,?,?,?,?)")
-        .run(projectId, taskId, owner, timestamp, timestamp);
-      return true;
-    } catch { return false; }
+        .run(projectId, task.id, owner, timestamp, timestamp);
+      this.db.exec("COMMIT");
+      return { task, created: true };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   touchProject(projectId: string, taskId: string, owner: string): void {
     this.db.prepare("UPDATE project_locks SET heartbeatAt=? WHERE projectId=? AND taskId=? AND owner=?")
       .run(now(), projectId, taskId, owner);
   }
-  releaseProject(projectId: string, taskId: string): void {
-    this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId=?").run(projectId, taskId);
+  releaseProject(projectId: string, taskId: string, owner: string): void {
+    this.db.prepare("DELETE FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").run(projectId, taskId, owner);
   }
   projectBusy(projectId: string): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM project_locks WHERE projectId=?").get(projectId));
+    const lock = this.db.prepare("SELECT taskId,owner FROM project_locks WHERE projectId=?").get(projectId) as { taskId: string; owner: string } | undefined;
+    if (!lock || !ownerIsAlive(lock.owner)) return false;
+    const task = this.db.prepare("SELECT status FROM tasks WHERE id=?").get(lock.taskId) as { status: TaskStatus } | undefined;
+    return Boolean(task && ["QUEUED", "RUNNING"].includes(task.status));
   }
 
   addProject(name: string, path: string): Project {
@@ -122,12 +161,47 @@ export class Store {
       .run(status, fields.threadId ?? current.threadId, fields.result ?? current.result,
         fields.error ?? current.error, now(), taskId);
   }
+  updateStatusOwned(taskId: string, projectId: string, owner: string, status: TaskStatus,
+    fields: { threadId?: string; result?: string; error?: string } = {}): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const owns = this.db.prepare("SELECT 1 FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").get(projectId, taskId, owner);
+      if (!owns) { this.db.exec("ROLLBACK"); return false; }
+      this.updateStatus(taskId, status, fields);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
   setThread(taskId: string, threadId: string): void {
     this.db.prepare("UPDATE tasks SET threadId=?,updatedAt=? WHERE id=?").run(threadId, now(), taskId);
+  }
+  setThreadOwned(taskId: string, projectId: string, owner: string, threadId: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.db.prepare("SELECT 1 FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").get(projectId, taskId, owner)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.setThread(taskId, threadId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   appendEvent(taskId: string, type: string, detail: string): void {
     this.db.prepare("INSERT INTO events(taskId,type,detail,createdAt) VALUES(?,?,?,?)")
       .run(taskId, type, detail, now());
+  }
+  appendEventOwned(taskId: string, projectId: string, owner: string, type: string, detail: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.db.prepare("SELECT 1 FROM project_locks WHERE projectId=? AND taskId=? AND owner=?").get(projectId, taskId, owner)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.appendEvent(taskId, type, detail);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   events(taskId: string, after = 0): StoredEvent[] {
     this.getTask(taskId);
