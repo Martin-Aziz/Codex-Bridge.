@@ -50,7 +50,7 @@ function value<T>(result: unknown): T {
   return JSON.parse(parsed.content?.[0]?.text ?? "null") as T;
 }
 
-async function testHarness(run: (base: string, client: Client, engine: TaskEngine) => Promise<void>, verifierMode: "jwt" | "inject" = "jwt", customVerifier?: TokenVerifier, expectedAudience = audience, metadataResource = expectedAudience) {
+async function testHarness(run: (base: string, client: Client, engine: TaskEngine) => Promise<void>, verifierMode: "jwt" | "inject" = "jwt", customVerifier?: TokenVerifier, expectedAudience = audience, metadataResource = expectedAudience, expectedIssuer = issuer) {
   const dir = await mkdtemp(join(tmpdir(), "bridge-mcp-"));
   const repo = join(dir, "repo"); await mkdir(repo); execFileSync("git", ["init", "-q", repo]);
   await writeFile(join(repo, "README.md"), "MCP test repo\n");
@@ -63,16 +63,16 @@ async function testHarness(run: (base: string, client: Client, engine: TaskEngin
   if (jwksServer) await new Promise<void>(resolve => jwksServer.listen(0, "127.0.0.1", resolve));
   const jwksPort = jwksServer ? (jwksServer.address() as { port: number }).port : 0;
   const verifier: TokenVerifier = customVerifier ?? (verifierMode === "jwt"
-    ? createJwtVerifier({ issuer, audience: expectedAudience, jwksUrl: `http://127.0.0.1:${jwksPort}/jwks` })
+    ? createJwtVerifier({ issuer: expectedIssuer, audience: expectedAudience, jwksUrl: `http://127.0.0.1:${jwksPort}/jwks` })
     : async token => token === "integration-bearer-token-1234567890" ? {
       subject: "local-test-user", clientId: "integration-client", scopes, expiresAt: Math.floor(Date.now() / 1000) + 3600, resource: audience,
     } : (() => { throw new Error("invalid token"); })());
   if (verifierMode === "jwt") {
-    const server = createMcpHttpServer(engine, verifier, expectedAudience, { issuer, resource: metadataResource, allowedSubjects: ["local-test-user"] });
+    const server = createMcpHttpServer(engine, verifier, expectedAudience, { issuer: expectedIssuer, resource: metadataResource, allowedSubjects: ["local-test-user"] });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     const base = `http://127.0.0.1:${port}`;
-    const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${await jwt(scopes, undefined, { audience: expectedAudience })}` } } });
+    const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${await jwt(scopes, undefined, { audience: expectedAudience, issuer: expectedIssuer })}` } } });
     const client = new Client({ name: "codex-bridge-test", version: "1.0.0" });
     try { await client.connect(transport); await run(base, client, engine); }
     finally { await client.close(); await engine.shutdown(); await new Promise<void>(resolve => server.close(() => resolve())); await new Promise<void>(resolve => jwksServer!.close(() => resolve())); store.close(); await rm(dir, { recursive: true, force: true }); }
@@ -129,6 +129,23 @@ test("tunnel metadata resource is distinct from the rewritten OAuth token audien
     const projects = await client.callTool({ name: "list_projects", arguments: {} });
     assert.equal(projects.isError, undefined);
   }, "jwt", undefined, tunnelAudience, localResource);
+});
+
+test("HTTP JWT verifier preserves an Auth0 issuer trailing slash and rejects the slashless issuer", async () => {
+  privateKeyMaterial[0] = await keys();
+  const auth0Issuer = "https://codex-bridge-test.us.auth0.com/";
+  await testHarness(async (base, client) => {
+    const accepted = await client.callTool({ name: "list_projects", arguments: {} });
+    assert.equal(accepted.isError, undefined, "token with the exact Auth0 issuer must be accepted");
+
+    const wrongIssuerToken = await jwt(scopes, undefined, { issuer: auth0Issuer.slice(0, -1) });
+    const rejected = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${wrongIssuerToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    assert.equal(rejected.status, 401, "slashless issuer must be rejected by the actual MCP HTTP endpoint");
+  }, "jwt", undefined, audience, audience, auth0Issuer);
 });
 
 test("HTTP auth rejects invalid JWTs, publishes path-aware metadata, refreshes expired tokens, and enforces scopes", async () => {

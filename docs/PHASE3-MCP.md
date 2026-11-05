@@ -67,6 +67,8 @@ Use the current HTTP MCP binding and a provisioned tunnel ID. Materialize the of
 ```sh
 tunnel-client help quickstart
 tunnel-client init --sample sample_mcp_with_dcr --profile codex-bridge --tunnel-id 'YOUR_TUNNEL_ID' --mcp-server-url 'http://127.0.0.1:49442/mcp'
+# Trust only the exact origin advertised as authorization_servers[0] in PRMD.
+export MCP_OAUTH_TRUSTED_ORIGINS='https://YOUR_AUTH0_TENANT.auth0.com'
 tunnel-client doctor --profile codex-bridge --explain
 read -rs 'CONTROL_PLANE_API_KEY?Runtime API key: '
 echo
@@ -75,6 +77,8 @@ tunnel-client run --profile codex-bridge
 ```
 
 The `read` command prompts without echoing the key and avoids placing it in shell history. Clear it from the environment when the tunnel exits with `unset CONTROL_PLANE_API_KEY`.
+
+`MCP_OAUTH_TRUSTED_ORIGINS` is the tunnel client's discovery allowlist for OAuth metadata and authorization-server origins that differ from the configured MCP server origin. For this setup, set it to the exact scheme, host, and port of the Auth0 `authorization_servers[0]` value published in protected-resource metadata; omit paths, query strings, and wildcard domains. The installed client accepts newline-separated origins through this environment variable (or repeated `--mcp.oauth-trusted-origin` flags / the YAML `mcp.oauth_trusted_origins` list). Configure it before `doctor` and `run`; flags replace the environment/YAML list, and the environment replaces YAML. Add another exact origin on a new line only if the metadata actually advertises it. This setting grants discovery trust only; do not broaden it to unrelated origins or confuse it with Harpoon OAuth forwarding configuration.
 
 `CONTROL_PLANE_TUNNEL_ID` is also accepted as an environment setting by the runtime, but a generated profile is the documented repeatable setup. The local HTTP request target is the configured MCP URL (`127.0.0.1:<port>`), which is the authority accepted by the bridge's loopback Host guard. This matches the tunnel client's documented HTTP target behavior; the Host forwarding still needs an end-to-end check after the organization's tunnel and runtime key are provisioned. Arbitrary and forwarded Host values are not trusted. Verify the local protected-resource metadata and 401 challenge before connecting.
 

@@ -42,7 +42,8 @@ function toolError(message: string): { isError: true; content: [{ type: "text"; 
 }
 
 export function createJwtVerifier(config: { issuer: string; jwksUrl: string; audience: string }): TokenVerifier {
-  const issuer = new URL(config.issuer).toString().replace(/\/$/, "");
+  // OIDC issuer identifiers are exact strings; Auth0 commonly includes a trailing slash.
+  const issuer = config.issuer;
   const audience = new URL(config.audience).toString();
   const jwks = createRemoteJWKSet(new URL(config.jwksUrl));
   return async token => {
